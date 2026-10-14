@@ -2142,6 +2142,38 @@ elif page == "Coding Practice":
             task_description = description_template.format(subject=subject, topic=topic)
             task_hint = hint_template.format(topic=topic)
 
+        # Give the first three Easy Python Variables-and-Input practices
+        # concrete requirements so they can be checked locally even when Gemini
+        # is unavailable. The checks below compare exact stdout for each case.
+        if subject == "Python" and topic == "Variables and Input" and level == "Easy":
+            if question_number == 1:
+                task_title = "Swap two numbers"
+                task_description = (
+                    "Read two integers from separate input lines. Swap their values and "
+                    "print the swapped numbers on one line, separated by one space. "
+                    "Example input: 4 then 9. Expected output: 9 4."
+                )
+                task_hint = "Read both values before changing either one; test negative and equal values too."
+            elif question_number == 2:
+                task_title = "Calculate rectangle area"
+                task_description = (
+                    "Read the rectangle's length and width from separate input lines. "
+                    "They may be decimal values. Print exactly `Area: ` followed by "
+                    "the area (length multiplied by width). Example: inputs 5 and 3 "
+                    "produce `Area: 15.0`. Assume dimensions are non-negative."
+                )
+                task_hint = "Convert both inputs to numbers, multiply them, and match the required output label and format."
+            elif question_number == 3:
+                task_title = "Sum, smallest, and largest"
+                task_description = (
+                    "Read exactly three integers (they may be on separate lines or one line). "
+                    "Print three lines in this exact format: `Sum: <sum>`, `Smallest: <minimum>`, "
+                    "and `Largest: <maximum>`. If fewer or more than three values are supplied, "
+                    "print `Please enter exactly 3 integers.` If any of the three values is not "
+                    "an integer, print `Invalid input. Please enter integers.`"
+                )
+                task_hint = "Split the received input into tokens, validate the count and integers, then calculate sum, minimum, and maximum. Test duplicates, negatives, and empty input."
+
         st.subheader(f"{subject} · {topic} · {level} · Question {question_number}")
         st.markdown(f"**Problem: {task_title}**")
         st.write(task_description)
@@ -2157,13 +2189,28 @@ elif page == "Coding Practice":
         if st.button("Review my solution", type="primary", key=f"review_{subject}_{topic}_{level}"):
             if not code.strip():
                 st.warning("Write your solution first.")
-            elif subject == "Python" and topic == "Variables and Input" and question_number == 1 and "swap" in task_title.lower():
-                # Known tests for the built-in Swap Two Numbers problem.
-                test_cases = [
-                    ("4\n9\n", "9 4"),
-                    ("-2\n7\n", "7 -2"),
-                    ("5\n5\n", "5 5"),
-                ]
+            elif subject == "Python" and topic == "Variables and Input" and level == "Easy" and question_number in {1, 2, 3}:
+                # Deterministic local tests: do not depend on Gemini availability.
+                if question_number == 1:
+                    test_cases = [
+                        ("4\n9\n", "9 4"),
+                        ("-2\n7\n", "7 -2"),
+                        ("5\n5\n", "5 5"),
+                    ]
+                elif question_number == 2:
+                    test_cases = [
+                        ("5\n3\n", "Area: 15.0"),
+                        ("2.5\n4\n", "Area: 10.0"),
+                        ("0\n8\n", "Area: 0.0"),
+                    ]
+                else:
+                    test_cases = [
+                        ("10\n20\n30\n", "Sum: 60\nSmallest: 10\nLargest: 30"),
+                        ("5\n5\n5\n", "Sum: 15\nSmallest: 5\nLargest: 5"),
+                        ("-10\n0\n10\n", "Sum: 0\nSmallest: -10\nLargest: 10"),
+                        ("", "Please enter exactly 3 integers."),
+                        ("1\nx\n3\n", "Invalid input. Please enter integers."),
+                    ]
                 with st.spinner("Running sample and edge test cases..."):
                     result = run_python_test_cases(code, test_cases)
                 if result["status"] == "syntax_error":
@@ -2188,7 +2235,13 @@ elif page == "Coding Practice":
                                 if item.get("error_details"):
                                     st.markdown("**Error details / traceback:**")
                                     st.code(item["error_details"], language="text")
-                        st.info("Hint only: compare the shown input format with your input statements. For two separate input lines, read each value appropriately; do not try to unpack a single integer into two variables. No full solution is shown.")
+                        if question_number == 1:
+                            local_hint = "Read both input values before swapping them, and print the two swapped values in the required order."
+                        elif question_number == 2:
+                            local_hint = "Convert both inputs to numeric values, multiply them, and match the exact `Area: ...` output format."
+                        else:
+                            local_hint = "Validate that exactly three integers were supplied; also check repeated values, negative values, empty input, and the required output labels."
+                        st.info("Hint only: " + local_hint + " No full solution is shown.")
             elif client is None:
                 st.info(offline_code_review(subject, topic, level, task_title, task_description, code))
             else:
