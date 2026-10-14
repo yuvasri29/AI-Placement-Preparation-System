@@ -2559,7 +2559,7 @@ elif page == "Progress History":
 
         # Readable chart with category labels and actual percentages
         chart_data = category_df.set_index("category")[["percentage"]]
-        st.bar_chart(chart_data, y="percentage", y_min=0, y_max=100)
+        st.bar_chart(chart_data, y="percentage")
         for _, row in category_df.iterrows():
             pct = float(row["percentage"])
             if pct < 40:
