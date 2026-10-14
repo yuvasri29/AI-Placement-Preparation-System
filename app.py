@@ -2608,8 +2608,7 @@ elif page == "Progress History":
         st.subheader("📅 Score trend")
         trend = df.iloc[::-1].copy()
         trend["session"] = range(1, len(trend) + 1)
-        st.line_chart(trend.set_index("session")[["percentage"]], y="percentage", y_min=0, y_max=100)
-
+        st.line_chart(trend.set_index("session")[["percentage"]])
         with st.expander("View all saved sessions"):
             st.dataframe(df, use_container_width=True, hide_index=True)
 
