@@ -2173,6 +2173,15 @@ elif page == "Coding Practice":
                     "an integer, print `Invalid input. Please enter integers.`"
                 )
                 task_hint = "Split the received input into tokens, validate the count and integers, then calculate sum, minimum, and maximum. Test duplicates, negatives, and empty input."
+            elif question_number == 4:
+                task_title = "Celsius to Fahrenheit converter"
+                task_description = (
+                    "Read one Celsius temperature from standard input; it may be an integer or decimal. "
+                    "Print exactly `Fahrenheit: ` followed by the converted Fahrenheit temperature rounded "
+                    "to two decimal places. Use Fahrenheit = Celsius * 9 / 5 + 32. If input is empty or "
+                    "not a valid number, print exactly `Invalid input`."
+                )
+                task_hint = "Read one value, validate that it can be converted to a number, apply the conversion formula, and format the result to two decimal places. Test zero, a negative value, decimals, invalid text, and empty input."
 
         st.subheader(f"{subject} · {topic} · {level} · Question {question_number}")
         st.markdown(f"**Problem: {task_title}**")
@@ -2189,7 +2198,7 @@ elif page == "Coding Practice":
         if st.button("Review my solution", type="primary", key=f"review_{subject}_{topic}_{level}"):
             if not code.strip():
                 st.warning("Write your solution first.")
-            elif subject == "Python" and topic == "Variables and Input" and level == "Easy" and question_number in {1, 2, 3}:
+            elif subject == "Python" and topic == "Variables and Input" and level == "Easy" and question_number in {1, 2, 3, 4}:
                 # Deterministic local tests: do not depend on Gemini availability.
                 if question_number == 1:
                     test_cases = [
@@ -2203,13 +2212,22 @@ elif page == "Coding Practice":
                         ("2.5\n4\n", "Area: 10.0"),
                         ("0\n8\n", "Area: 0.0"),
                     ]
-                else:
+                elif question_number == 3:
                     test_cases = [
                         ("10\n20\n30\n", "Sum: 60\nSmallest: 10\nLargest: 30"),
                         ("5\n5\n5\n", "Sum: 15\nSmallest: 5\nLargest: 5"),
                         ("-10\n0\n10\n", "Sum: 0\nSmallest: -10\nLargest: 10"),
                         ("", "Please enter exactly 3 integers."),
                         ("1\nx\n3\n", "Invalid input. Please enter integers."),
+                    ]
+                else:
+                    test_cases = [
+                        ("25\n", "Fahrenheit: 77.00"),
+                        ("0\n", "Fahrenheit: 32.00"),
+                        ("-40\n", "Fahrenheit: -40.00"),
+                        ("36.5\n", "Fahrenheit: 97.70"),
+                        ("hello\n", "Invalid input"),
+                        ("", "Invalid input"),
                     ]
                 with st.spinner("Running sample and edge test cases..."):
                     result = run_python_test_cases(code, test_cases)
@@ -2239,8 +2257,10 @@ elif page == "Coding Practice":
                             local_hint = "Read both input values before swapping them, and print the two swapped values in the required order."
                         elif question_number == 2:
                             local_hint = "Convert both inputs to numeric values, multiply them, and match the exact `Area: ...` output format."
-                        else:
+                        elif question_number == 3:
                             local_hint = "Validate that exactly three integers were supplied; also check repeated values, negative values, empty input, and the required output labels."
+                        else:
+                            local_hint = "Validate the single temperature input, apply Celsius * 9 / 5 + 32, format to exactly two decimal places, and handle invalid or empty input."
                         st.info("Hint only: " + local_hint + " No full solution is shown.")
             elif client is None:
                 st.info(offline_code_review(subject, topic, level, task_title, task_description, code))
