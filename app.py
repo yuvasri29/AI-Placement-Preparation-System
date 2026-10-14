@@ -11,6 +11,15 @@ import tempfile
 import sys
 from pathlib import Path
 from datetime import datetime
+from io import BytesIO
+
+# Word export is optional; the main app can still load if python-docx is not installed.
+try:
+    from docx import Document
+    from docx.shared import Inches
+except ImportError:
+    Document = None
+    Inches = None
 
 import pandas as pd
 import streamlit as st
@@ -673,56 +682,6 @@ def run_python_test_cases(code, test_cases, timeout_seconds=2):
             })
 
         return {"status": "tested", "results": results}
-
-
-def offline_code_review(subject, topic, level, task_title, task_description, code):
-    """Provide safe, lightweight feedback when Gemini is unavailable; never execute submitted code."""
-    submitted = code.strip()
-    if not submitted:
-        return "Write your solution first, then review it."
-
-    if subject == "Python":
-        try:
-            tree = ast.parse(submitted)
-        except SyntaxError as exc:
-            line = exc.lineno or "unknown"
-            return (f"**Local review — syntax issue found**\n\n"
-                    f"Python reports a syntax error near line {line}: {exc.msg}.\n\n"
-                    "**Hint:** Check indentation, brackets, colons, quotation marks, and whether each statement is complete. "
-                    "Fix the syntax issue and review again. No full solution is shown.")
-
-        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-        checks = []
-        if any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "input" for node in ast.walk(tree)):
-            checks.append("Input is being read; compare the number of input values and their format with the problem statement.")
-        if not any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print" for node in ast.walk(tree)):
-            checks.append("I couldn't find a print() call. Check whether the expected output is produced.")
-        if "swap" in (task_title + " " + task_description).lower() or "swapping" in (task_title + " " + task_description).lower():
-            if not any(isinstance(node, ast.Name) and node.id in names for node in ast.walk(tree)):
-                checks.append("Check that both input values are stored and exchanged correctly.")
-        if not checks:
-            checks.append("The Python syntax is valid. Now check the algorithm against the exact requirements and sample input/output.")
-        return ("**Local review (Gemini is unavailable)**\n\n"
-                "Python syntax looks valid. I haven't executed your program, so correctness is not confirmed.\n\n"
-                "**Please check:**\n" + "\n".join(f"- {item}" for item in checks) +
-                "\n\nTry a normal case and at least two edge cases. This review gives hints only, not a complete solution.")
-
-    # Conservative checks for non-Python submissions; do not execute code or SQL.
-    hints = []
-    if submitted.count("(") != submitted.count(")"):
-        hints.append("Check that every opening parenthesis has a matching closing parenthesis.")
-    if submitted.count("{") != submitted.count("}"):
-        hints.append("Check that every opening brace has a matching closing brace.")
-    if subject == "SQL":
-        if not any(word in submitted.lower().split() for word in ("select", "insert", "update", "delete")):
-            hints.append("Check that your query begins with the SQL operation required by the task.")
-        hints.append("Check table/column names, join conditions, NULL values, and whether the result matches the requested output.")
-    if not hints:
-        hints.append("Check the required input/output format, boundary cases, and whether each condition matches the problem statement.")
-    return ("**Local review (Gemini is unavailable)**\n\n"
-            "I can't confirm full correctness without a language-specific compiler or test runner.\n\n"
-            "**Hints to check:**\n" + "\n".join(f"- {item}" for item in hints) +
-            "\n\nYour code was not executed, and no full solution is shown.")
 
 
 def offline_interview_evaluation(category, question, answer):
@@ -2557,7 +2516,7 @@ elif page == "Progress History":
         )
         category_df = category_df.sort_values("percentage", ascending=True)
 
-        # Readable chart with category labels and actual percentages
+        # Streamlit's st.bar_chart does not accept y_min/y_max arguments.
         chart_data = category_df.set_index("category")[["percentage"]]
         st.bar_chart(chart_data, y="percentage")
         for _, row in category_df.iterrows():
@@ -2608,10 +2567,181 @@ elif page == "Progress History":
         st.subheader("📅 Score trend")
         trend = df.iloc[::-1].copy()
         trend["session"] = range(1, len(trend) + 1)
-        st.line_chart(trend.set_index("session")[["percentage"]])
+        # Streamlit's st.line_chart does not accept y_min/y_max arguments.
+        st.line_chart(trend.set_index("session")[["percentage"]], y="percentage")
+
         with st.expander("View all saved sessions"):
             st.dataframe(df, use_container_width=True, hide_index=True)
 
+    # Always display the Word export button, even if no progress has been saved yet.
+    def build_word_progress_report(history_df, student_name):
+        report_df = history_df.copy()
+        required_defaults = {
+            "category": "",
+            "topic": "",
+            "score": 0,
+            "total": 0,
+            "difficulty": "",
+            "notes": "",
+            "created_at": "",
+        }
+        for col, default in required_defaults.items():
+            if col not in report_df.columns:
+                report_df[col] = default
+
+        report_df["score"] = pd.to_numeric(report_df["score"], errors="coerce").fillna(0)
+        report_df["total"] = pd.to_numeric(report_df["total"], errors="coerce").fillna(0)
+        report_df["percentage"] = report_df.apply(
+            lambda row: score_percent(row["score"], row["total"]), axis=1
+        )
+
+        if Document is None:
+            return None
+
+        doc = Document()
+        section = doc.sections[0]
+        if Inches is not None:
+            section.top_margin = Inches(0.65)
+            section.bottom_margin = Inches(0.65)
+            section.left_margin = Inches(0.65)
+            section.right_margin = Inches(0.65)
+
+        doc.add_heading("AI Placement Preparation & Tracking System", 0)
+        doc.add_heading("Student Progress & Performance Report", level=1)
+        doc.add_paragraph(f"Student: {student_name}")
+        doc.add_paragraph(f"Generated on: {datetime.now().strftime('%d-%m-%Y %H:%M')}")
+
+        if report_df.empty:
+            doc.add_paragraph("No saved practice sessions are available yet. Complete a practice session and download the report again.")
+        else:
+            valid_df = report_df[report_df["total"] > 0].copy()
+            total_questions = float(valid_df["total"].sum())
+            total_score = float(valid_df["score"].sum())
+            weighted_overall = (total_score / total_questions * 100) if total_questions else 0.0
+            average_session = float(valid_df["percentage"].mean()) if not valid_df.empty else 0.0
+
+            doc.add_heading("1. Overall Summary", level=2)
+            summary = [
+                ("Practice sessions recorded", str(len(report_df))),
+                ("Sessions with scored items", str(len(valid_df))),
+                ("Total questions/items", f"{total_questions:g}"),
+                ("Total score earned", f"{total_score:g} / {total_questions:g}"),
+                ("Overall percentage (weighted)", f"{weighted_overall:.1f}%"),
+                ("Average session percentage", f"{average_session:.1f}%"),
+            ]
+            summary_table = doc.add_table(rows=0, cols=2)
+            summary_table.style = "Table Grid"
+            for label, value in summary:
+                cells = summary_table.add_row().cells
+                cells[0].text = label
+                cells[1].text = value
+
+            doc.add_heading("2. Practice-wise Performance", level=2)
+            category_summary = valid_df.groupby("category", dropna=False).agg(
+                sessions=("category", "count"), score=("score", "sum"), total=("total", "sum")
+            ).reset_index()
+            category_summary["percentage"] = category_summary.apply(
+                lambda row: score_percent(row["score"], row["total"]), axis=1
+            )
+            cat_table = doc.add_table(rows=1, cols=5)
+            cat_table.style = "Table Grid"
+            for i, label in enumerate(["Practice area", "Sessions", "Score", "Questions", "Percentage"]):
+                cat_table.rows[0].cells[i].text = label
+            for _, row in category_summary.iterrows():
+                cells = cat_table.add_row().cells
+                cells[0].text = str(row["category"])
+                cells[1].text = str(int(row["sessions"]))
+                cells[2].text = f"{row['score']:g}"
+                cells[3].text = f"{row['total']:g}"
+                cells[4].text = f"{row['percentage']:.1f}%"
+
+            doc.add_heading("3. Topic-wise Performance", level=2)
+            topic_summary = valid_df.groupby(["category", "topic"], dropna=False).agg(
+                sessions=("topic", "count"), score=("score", "sum"), total=("total", "sum")
+            ).reset_index()
+            topic_summary["percentage"] = topic_summary.apply(
+                lambda row: score_percent(row["score"], row["total"]), axis=1
+            )
+            topic_summary = topic_summary.sort_values("percentage", ascending=True)
+            topic_table = doc.add_table(rows=1, cols=5)
+            topic_table.style = "Table Grid"
+            for i, label in enumerate(["Category", "Topic", "Sessions", "Score / Total", "Percentage"]):
+                topic_table.rows[0].cells[i].text = label
+            for _, row in topic_summary.iterrows():
+                cells = topic_table.add_row().cells
+                cells[0].text = str(row["category"])
+                cells[1].text = str(row["topic"])
+                cells[2].text = str(int(row["sessions"]))
+                cells[3].text = f"{row['score']:g} / {row['total']:g}"
+                cells[4].text = f"{row['percentage']:.1f}%"
+
+            doc.add_heading("4. Recommended Next Practice", level=2)
+            if topic_summary.empty:
+                doc.add_paragraph("No scored topic data is available for recommendations yet.")
+            else:
+                for _, row in topic_summary.head(8).iterrows():
+                    pct = float(row["percentage"])
+                    if pct < 40:
+                        advice = "High priority: revise fundamentals and practise easy questions first."
+                    elif pct < 60:
+                        advice = "Review mistakes and practise another set of questions."
+                    elif pct < 80:
+                        advice = "Keep practising, focus on accuracy, and gradually increase difficulty."
+                    else:
+                        advice = "Maintain this strength with revision and medium/hard questions."
+                    doc.add_paragraph(
+                        f"{row['category']} — {row['topic']}: {pct:.1f}% across "
+                        f"{int(row['sessions'])} session(s). {advice}",
+                        style="List Bullet",
+                    )
+
+            doc.add_heading("5. Complete Progress History", level=2)
+            history_columns = [
+                "created_at", "category", "topic", "difficulty", "score", "total", "percentage"
+            ]
+            history_table = doc.add_table(rows=1, cols=len(history_columns))
+            history_table.style = "Table Grid"
+            for i, column in enumerate(history_columns):
+                history_table.rows[0].cells[i].text = column.replace("_", " ").title()
+            for _, row in report_df.iterrows():
+                cells = history_table.add_row().cells
+                for i, column in enumerate(history_columns):
+                    value = row[column]
+                    if pd.isna(value):
+                        cells[i].text = "—"
+                    elif column == "percentage":
+                        cells[i].text = f"{float(value):.1f}%"
+                    elif column in {"score", "total"}:
+                        cells[i].text = f"{float(value):g}"
+                    else:
+                        cells[i].text = str(value)
+
+            doc.add_paragraph(
+                "Calculation note: overall percentage is total recorded score divided by total recorded items. "
+                "This report contains saved sessions for the student selected in the application."
+            )
+
+        buffer = BytesIO()
+        doc.save(buffer)
+        return buffer.getvalue()
+
+    st.subheader("📄 Download Progress History as Word")
+    st.caption("The Word report includes an overall summary, category-wise performance, topic-wise scores, practice recommendations, and your saved session history.")
+    if Document is None:
+        st.error("Word export is unavailable because python-docx is not installed. Add 'python-docx>=1.1.0' to requirements.txt and redeploy.")
+    else:
+        word_report = build_word_progress_report(df, student)
+        safe_student_name = "_".join(str(student).strip().split()) or "Student"
+        st.download_button(
+            "⬇️ Download Progress History (Word .docx)",
+            data=word_report,
+            file_name=f"{safe_student_name}_Placement_Progress_Report.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key="download_progress_history_word_report",
+            use_container_width=True,
+        )
+
+    if not df.empty:
         csv_data = df.to_csv(index=False).encode("utf-8")
         st.download_button(
             "Download history as CSV",
