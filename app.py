@@ -549,22 +549,62 @@ def get_client(api_key):
 
 
 def ask_gemini(client, prompt):
+    """Ask Gemini and try supported fallback models before reporting a real error.
+
+    A provider/API failure is returned with the AI_SERVICE_ERROR prefix so callers
+    can display a clear diagnostic instead of pretending a local review was AI.
+    """
     if client is None:
-        return None
-    try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
+        return (
+            "AI_SERVICE_ERROR: Gemini client is not configured. Add GEMINI_API_KEY "
+            "in Streamlit Cloud → App settings → Secrets, save it, and reboot the app."
         )
-        return getattr(response, "text", None) or "The AI returned an empty response."
-    except Exception as exc:
-        # Keep provider errors out of the UI; quota errors can be very long.
-        message = str(exc).lower()
-        if any(term in message for term in ("resource_exhausted", "quota", "429", "rate limit")):
-            return "AI review is temporarily unavailable because the Gemini API quota has been reached. Your question and hints are still available. Try again after the quota resets, or check your Gemini API usage and limits."
-        if any(term in message for term in ("503", "unavailable", "overloaded")):
-            return "Gemini is temporarily busy. Please try again in a little while. Your question and hints are still available."
-        return "AI review could not connect right now. Check your API key and internet connection, then try again."
+
+    # Try the configured primary model first, then stable alternatives in case
+    # one model is temporarily overloaded or not enabled for this API key.
+    models_to_try = []
+    for model_name in (MODEL_NAME, "gemini-3.6-flash", "gemini-3.5-flash-lite"):
+        if model_name not in models_to_try:
+            models_to_try.append(model_name)
+
+    errors = []
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            response_text = getattr(response, "text", None)
+            if response_text and response_text.strip():
+                return response_text.strip()
+            errors.append(f"{model_name}: empty response")
+        except Exception as exc:
+            # Keep each model's failure and try the next available model.
+            errors.append(f"{model_name}: {str(exc)[:260]}")
+
+    combined = " | ".join(errors).lower()
+    if any(term in combined for term in ("resource_exhausted", "quota", "429", "rate limit")):
+        message = (
+            "AI_SERVICE_ERROR: Gemini rejected all attempted model requests due to quota/rate limits. "
+            "Check API usage and limits or retry after they reset. Tried: " + " | ".join(errors)
+        )
+    elif any(term in combined for term in ("api key not valid", "invalid api key", "unauthenticated", "permission_denied", "403")):
+        message = (
+            "AI_SERVICE_ERROR: Gemini rejected the API key or its permissions. Check that GEMINI_API_KEY "
+            "is correct in Streamlit Secrets and that the Generative Language API is enabled. Tried: "
+            + " | ".join(errors)
+        )
+    elif any(term in combined for term in ("503", "unavailable", "overloaded", "temporarily busy")):
+        message = (
+            "AI_SERVICE_ERROR: Gemini is temporarily unavailable, including the fallback models. "
+            "Please retry in a little while. Details: " + " | ".join(errors)
+        )
+    else:
+        message = (
+            "AI_SERVICE_ERROR: Gemini review failed for all configured models. Check the API key, "
+            "model access, and network connection. Details: " + " | ".join(errors)
+        )
+    return message
 
 
 def run_python_test_cases(code, test_cases, timeout_seconds=2):
@@ -1547,7 +1587,7 @@ Rules:
 Excluded questions (do not repeat): {json.dumps(excluded[-250:], ensure_ascii=False)}
 """
             raw = ask_gemini(client, prompt)
-            if raw and raw.startswith("Gemini request failed:"):
+            if raw and raw.startswith("AI_SERVICE_ERROR:"):
                 last_ai_error = raw
                 break
             parsed = parse_json_array(raw)
@@ -2142,7 +2182,7 @@ elif page == "Coding Practice":
             task_description = description_template.format(subject=subject, topic=topic)
             task_hint = hint_template.format(topic=topic)
 
-        # Give the first three Easy Python Variables-and-Input practices
+        # Give the first five Easy Python Variables-and-Input practices
         # concrete requirements so they can be checked locally even when Gemini
         # is unavailable. The checks below compare exact stdout for each case.
         if subject == "Python" and topic == "Variables and Input" and level == "Easy":
@@ -2182,6 +2222,16 @@ elif page == "Coding Practice":
                     "not a valid number, print exactly `Invalid input`."
                 )
                 task_hint = "Read one value, validate that it can be converted to a number, apply the conversion formula, and format the result to two decimal places. Test zero, a negative value, decimals, invalid text, and empty input."
+            elif question_number == 5:
+                task_title = "Calculate simple interest"
+                task_description = (
+                    "Read exactly three numeric values: principal, annual interest rate, and time in years. "
+                    "Values may be on separate lines or separated by spaces. Calculate simple interest using "
+                    "interest = principal * rate * time / 100. Print exactly `Simple Interest: ` followed by "
+                    "the result rounded to two decimal places. If the input is empty, does not contain exactly "
+                    "three numeric values, or any value is negative, print exactly `Invalid input`."
+                )
+                task_hint = "Read and validate three numeric values, calculate principal × rate × time ÷ 100, and print two decimal places. Test zero, decimals, negative values, invalid text, and empty input."
 
         st.subheader(f"{subject} · {topic} · {level} · Question {question_number}")
         st.markdown(f"**Problem: {task_title}**")
@@ -2198,7 +2248,7 @@ elif page == "Coding Practice":
         if st.button("Review my solution", type="primary", key=f"review_{subject}_{topic}_{level}"):
             if not code.strip():
                 st.warning("Write your solution first.")
-            elif subject == "Python" and topic == "Variables and Input" and level == "Easy" and question_number in {1, 2, 3, 4}:
+            elif subject == "Python" and topic == "Variables and Input" and level == "Easy" and question_number in {1, 2, 3, 4, 5}:
                 # Deterministic local tests: do not depend on Gemini availability.
                 if question_number == 1:
                     test_cases = [
@@ -2220,13 +2270,22 @@ elif page == "Coding Practice":
                         ("", "Please enter exactly 3 integers."),
                         ("1\nx\n3\n", "Invalid input. Please enter integers."),
                     ]
-                else:
+                elif question_number == 4:
                     test_cases = [
                         ("25\n", "Fahrenheit: 77.00"),
                         ("0\n", "Fahrenheit: 32.00"),
                         ("-40\n", "Fahrenheit: -40.00"),
                         ("36.5\n", "Fahrenheit: 97.70"),
                         ("hello\n", "Invalid input"),
+                        ("", "Invalid input"),
+                    ]
+                else:
+                    test_cases = [
+                        ("5000\n5\n2\n", "Simple Interest: 500.00"),
+                        ("1500\n2.5\n4\n", "Simple Interest: 150.00"),
+                        ("0\n5\n2\n", "Simple Interest: 0.00"),
+                        ("-1000\n5\n2\n", "Invalid input"),
+                        ("abc\n5\n2\n", "Invalid input"),
                         ("", "Invalid input"),
                     ]
                 with st.spinner("Running sample and edge test cases..."):
@@ -2259,24 +2318,35 @@ elif page == "Coding Practice":
                             local_hint = "Convert both inputs to numeric values, multiply them, and match the exact `Area: ...` output format."
                         elif question_number == 3:
                             local_hint = "Validate that exactly three integers were supplied; also check repeated values, negative values, empty input, and the required output labels."
-                        else:
+                        elif question_number == 4:
                             local_hint = "Validate the single temperature input, apply Celsius * 9 / 5 + 32, format to exactly two decimal places, and handle invalid or empty input."
+                        else:
+                            local_hint = "Validate that exactly three numeric values were supplied, reject negative values, calculate principal * rate * time / 100, and print two decimal places."
                         st.info("Hint only: " + local_hint + " No full solution is shown.")
             elif client is None:
-                st.info(offline_code_review(subject, topic, level, task_title, task_description, code))
+                st.error(
+                    "AI review is not configured, so this submission has not been reviewed. "
+                    "Add GEMINI_API_KEY in Streamlit Cloud → App settings → Secrets, save, and reboot the app."
+                )
             else:
-                prompt = f"You are a placement coding mentor. Subject: {subject}. Language/area: {subject}. Level: {level}. Topic: {topic}. Problem: {task_title}. Requirements: {task_description}. Student submission:\n{code}\nFirst assess the approach. If incorrect, give only 2-3 hints and the failing edge cases; do NOT reveal the complete solution. If correct, explain why it works and give complexity where relevant. For SQL, check query logic. Do not claim you executed the code."
-                with st.spinner("Reviewing your solution..."):
+                prompt = f"You are a placement coding mentor. Subject: {subject}. Language/area: {subject}. Level: {level}. Topic: {topic}. Problem: {task_title}. Requirements: {task_description}. Student submission:\n{code}\nReview this specific submission against the exact problem requirements. If incorrect, give only 2-3 actionable hints and identify likely failing edge cases; do NOT reveal the complete solution. If correct, explain why it works and note any untested cases. Do not claim that you executed the code unless a test runner result is provided."
+                with st.spinner("Reviewing your solution with Gemini..."):
                     feedback = ask_gemini(client, prompt)
-                if feedback:
-                    if feedback.startswith(("AI review is temporarily unavailable", "Gemini is temporarily busy", "AI review could not connect")):
-                        st.info(offline_code_review(subject, topic, level, task_title, task_description, code))
-                        st.caption(feedback)
-                    else:
-                        st.markdown(feedback)
-                        save_result(student, subject, topic, 0, 1, level, notes="Solution reviewed by AI")
+                if feedback and feedback.startswith("AI_SERVICE_ERROR:"):
+                    # Do not show the same generic local-review text for every program.
+                    # Explain the actual connection/model/quota problem instead.
+                    st.error(feedback.replace("AI_SERVICE_ERROR:", "Gemini AI review unavailable:", 1).strip())
+                    st.caption(
+                        "No AI correctness verdict was produced. Fix the Gemini API issue and click "
+                        "Review my solution again. The built-in test runner remains available only for questions with defined test cases."
+                    )
+                elif feedback:
+                    st.markdown(feedback)
+                    save_result(student, subject, topic, 0, 1, level, notes="Solution reviewed by AI")
                 else:
-                    st.info(offline_code_review(subject, topic, level, task_title, task_description, code))
+                    st.error(
+                        "Gemini returned no feedback. Please retry, or check the Streamlit Secrets API key and model access."
+                    )
 
 # ----------------------------- AI MOCK INTERVIEW ----------------------
 elif page == "AI Mock Interview":
@@ -2395,7 +2465,7 @@ For technical questions, value correctness and examples.
                     with st.spinner("Evaluating your answer..."):
                         raw = ask_gemini(client, prompt)
 
-                if not raw or raw.startswith("Gemini request failed") or raw == "The AI returned an empty response.":
+                if not raw or raw.startswith("AI_SERVICE_ERROR:") or raw == "The AI returned an empty response.":
                     result = offline_interview_evaluation(interview_type, question, final_answer)
                     st.info("Gemini is unavailable or over quota. Showing basic offline feedback; it does not verify technical correctness.")
                 else:
